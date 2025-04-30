@@ -213,7 +213,7 @@ def main():
     else:
         raise ValueError(f"Unsupported operating system: {os.name}")
 
-    parser = argparse.ArgumentParser(description="Convert SVG file to XML track for TrackGen or TrackEditor")
+    parser = argparse.ArgumentParser(description="Convert SVG file to XML track for TrackGen for Torcs and Speed Dreams")
     parser.add_argument("svgfile", type=str, help="Pathame of the SVG file")
     parser.add_argument("-t", "--track-directory", type=str, default=parameters["default_track_directory"], help="The track directory of Torcs, Speed Dreams, or any other destination directory. Default: " + parameters["default_track_directory"])
     parser.add_argument("-c", "--category", type=str, default="circuit", help="The track category (circuit, road, oval, dirt...). Default is 'circuit'")
@@ -238,7 +238,10 @@ def main():
     print(f"Output file: {parameters['output_file']}")
 
     # Load SVG file and get the segments of the path
-    paths, attributes = svg2paths(args.svgfile)
+    try:
+        paths, attributes = svg2paths(args.svgfile)
+    except Exception as e:
+        parser.error(f"Failed to parse the SVG file '{args.svgfile}': {e}")
     segments = paths[0]
 
     # Chechk if the path is closed
