@@ -51,26 +51,6 @@ def length_in_meters(value, parameters):
     return format_number((value / parameters["svg_length"]) * parameters["track_length"])
 
 def create_xml_file(segments, parameters):
-#     params = etree.Element("params")
-#     params.set("name", "test")
-#     params.set("type", "param")
-#     params.set("mode", "mw")
-
-#     sectionSurfaces = etree.SubElement(params, "section")
-#     sectionSurfaces.set("name", "Surfaces")
-#     sectionSurfaces.text = "&default-surfaces;"
-
-#     sectionSurfaces = etree.SubElement(params, "section")
-#     sectionSurfaces.set("name", "Header")
-
-#     sectionGraphic = etree.SubElement(params, "section")
-#     sectionGraphic.set("name", "Graphic")
-#     attstr = etree.SubElement(sectionGraphic, "attstr")
-#     attstr.set("name", "3d description")
-#     attstr.set("val", "circulo.ac")
-
-#     tree = etree.ElementTree(params)
-#     # etree.indent(tree, space="\t", level=0)
     doctype = """<!DOCTYPE params SYSTEM "../../../src/libs/tgf/params.dtd" [
 <!--  general definitions for tracks  -->
 <!ENTITY default-surfaces SYSTEM "../../../data/tracks/surfaces.xml">
@@ -157,39 +137,28 @@ def generate_segments_xml(segments, parameters):
         attstr.set("name", "type")
         attstr.set("val", curvature)
 
-        # print(f"<!--******************************-->")
-        # print(f"<!--     Segment {i + 1:2d}                -->")
-        # print(f"<!--******************************-->")
-        # print(f'<section name="{i + 1}">')
-        # print(f'  <attstr name="type" val="{curvature}" />')
         if curvature == "str":
-            # print(f'  <attnum name="lg" unit="m" val="{length_in_meters(length)}" />')
             attnum = etree.SubElement(track, "attnum")
             attnum.set("name", "lg")
             attnum.set("unit", "m")
             attnum.set("val", length_in_meters(length, parameters))
         else:
-            # print(f'  <attnum name="arc" unit="deg" val="{format_number(np.degrees(abs(angle)))}" />')
             attnum = etree.SubElement(track, "attnum")
             attnum.set("name", "arc")
             attnum.set("unit", "deg")
             attnum.set("val", format_number(np.degrees(abs(angle))))
-            # print(f'  <attnum name="radius" unit="m" val="{length_in_meters(radius)}" />')
             attnum = etree.SubElement(track, "attnum")
             attnum.set("name", "radius")
             attnum.set("unit", "m")
             attnum.set("val", length_in_meters(radius, parameters))
             if end_radius != radius:
-                # print(f'  <attnum name="end radius" unit="m" val="{length_in_meters(end_radius)}" />')
                 attnum = etree.SubElement(track, "attnum")
                 attnum.set("name", "end radius")
                 attnum.set("unit", "m")
                 attnum.set("val", length_in_meters(end_radius, parameters))
-        # print(f'  <attstr name="surface" val="{surface}" />')
         attstr = etree.SubElement(track, "attstr")
         attstr.set("name", "surface")
         attstr.set("val", parameters["surface"])
-        # print(f'</section>')
 
     return tracks
 
