@@ -13,18 +13,22 @@ def calculate_radius_end_radius(angle_radians, segment, prev_segment, next_segme
     angle_radians = abs(angle_radians)
     distance = abs(next_segment.start - prev_segment.end)
 
-    angle_real = abs(angle_between_segments(prev_segment, segment) * 2)
+    # Number of steps (nbSteps) for precision
+    nb_steps = 4  # As per the Java implementation
+    delta_angle = angle_radians / nb_steps
 
-    distorsion = angle_real - angle_radians
+    radius_start = 0
+    radius_end = 0
 
-    angle_end = abs(angle_radians - distorsion)
+    for step in range(nb_steps):
+        step_angle = delta_angle * (step + 1)
+        step_distance = distance / angle_radians * step_angle
+        step_radius = step_distance / (2 * np.sin(step_angle / 2))
 
-    distance_start = distance / angle_radians * angle_end
-    distance_end = distance / angle_radians * angle_real
+        if step == 0:
+            radius_start = step_radius
+        radius_end = step_radius
 
-    radius_start = distance_start / (2 * np.sin(angle_radians / 2))
-    radius_end = distance_end / (2 * np.sin(angle_radians / 2))
-   
     return radius_start, radius_end
 
 def angle_between_segments(segment1, segment2):
