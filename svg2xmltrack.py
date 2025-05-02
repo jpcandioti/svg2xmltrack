@@ -9,7 +9,7 @@ from lxml import etree
 import xmlformatter
 
 
-def calculate_radius_end_radius(angle_radians, segment, prev_segment, next_segment):
+def calculate_radius_end_radius(angle_radians, prev_segment, next_segment):
     angle_radians = abs(angle_radians)
     distance = abs(next_segment.start - prev_segment.end)
 
@@ -119,7 +119,7 @@ def generate_segments_xml(segments, parameters):
             else:
                 curvature = "lft"
 
-            radius, end_radius = calculate_radius_end_radius(angle, segment, prev_segment, next_segment)
+            radius, end_radius = calculate_radius_end_radius(angle, prev_segment, next_segment)
         else:
             curvature = "str"
 
@@ -132,7 +132,7 @@ def generate_segments_xml(segments, parameters):
             segment_name = f"Straight {(i + 2) / 2:.0f}"
 
         tracks.append(etree.Comment(f"******************************"))
-        tracks.append(etree.Comment(f"     {segment_name}                "))
+        tracks.append(etree.Comment(f"{segment_name.center(30)}"))
         tracks.append(etree.Comment(f"******************************"))
 
         track = etree.SubElement(tracks, "section")
@@ -174,18 +174,18 @@ def get_output_file(parameters, parser):
     if not os.path.exists(output_file):
         try:
             os.makedirs(output_file)
-            print(f"Creating track directory: {parameters['output_file']}")
+            print(f"Creating track directory: {output_file}")
         except Exception as e:
-            parser.error(f"Failed to create track directory '{parameters['output_file']}'.")
+            parser.error(f"Failed to create track directory '{output_file}'.")
 
     codename = parameters["name"].lower().replace(" ", "_")
     output_file = os.path.join(output_file, codename)
     if not os.path.exists(output_file):
         try:
             os.makedirs(output_file)
-            print(f"Creating track directory: {parameters['output_file']}")
+            print(f"Creating track directory: {output_file}")
         except Exception as e:
-            parser.error(f"Failed to create track directory '{parameters['output_file']}'.")
+            parser.error(f"Failed to create track directory '{output_file}'.")
     
     output_file = os.path.join(output_file, codename) + ".xml"
 
