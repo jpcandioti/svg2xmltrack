@@ -9,27 +9,94 @@ from lxml import etree
 import xmlformatter
 
 
-def calculate_radius_end_radius(angle_radians, prev_segment, next_segment):
-    angle_radians = abs(angle_radians)
-    distance = abs(next_segment.start - prev_segment.end)
+def _simulate_curve_endpoint(R_s, R_e, arc, n_steps=100):
+    """Simulate TrackEditor's Curve.java algorithm (right-turn frame).
+    Returns (x_fwd, y_ctr): chord components along and perpendicular to start heading,
+    where y_ctr > 0 for a valid curve turning toward the center.
+    """
+    L = arc * (R_s + R_e) / 2
+    delta_R = (R_e - R_s) / max(n_steps - 1, 1)
+    step_length = L / n_steps
 
-    # Number of steps (nbSteps) for precision
-    nb_steps = 4  # As per the Java implementation
-    delta_angle = angle_radians / nb_steps
+    # Adjust step_length so total rotation equals arc exactly (as TrackEditor does)
+    if abs(R_e - R_s) > 1e-10:
+        tmp_angle, cur_R = 0.0, R_s
+        for _ in range(n_steps):
+            tmp_angle += step_length / cur_R
+            cur_R += delta_R
+        if tmp_angle > 1e-10:
+            step_length *= arc / tmp_angle
 
-    radius_start = 0
-    radius_end = 0
+    X, Y, A, cur_R = 0.0, 0.0, 0.0, R_s
+    for _ in range(n_steps):
+        cos_t = np.cos(A + np.pi / 2)
+        sin_t = np.sin(A + np.pi / 2)
+        xC = X - cos_t * cur_R
+        yC = Y - sin_t * cur_R
+        sa = -step_length / cur_R   # negative = right turn
+        c, s = np.cos(sa), np.sin(sa)
+        dx, dy = X - xC, Y - yC
+        X = dx * c - dy * s + xC
+        Y = dx * s + dy * c + yC
+        A += sa
+        cur_R += delta_R
 
-    for step in range(nb_steps):
-        step_angle = delta_angle * (step + 1)
-        step_distance = distance / angle_radians * step_angle
-        step_radius = step_distance / (2 * np.sin(step_angle / 2))
+    return X, -Y  # x_fwd, y_ctr (y_ctr > 0 for valid right turn)
 
-        if step == 0:
-            radius_start = step_radius
-        radius_end = step_radius
 
-    return radius_start, radius_end
+def calculate_radius_end_radius(angle_radians, segment, prev_segment):
+    arc = abs(angle_radians)
+    fallback_R = abs(segment.end - segment.start) / (2 * np.sin(arc / 2))
+
+    if arc < 1e-4:
+        return fallback_R, fallback_R
+
+    # Project chord into local frame aligned with start heading
+    d1_unit = (prev_segment.end - prev_segment.start)
+    d1_unit = d1_unit / abs(d1_unit)
+    chord_local = (segment.end - segment.start) * d1_unit.conjugate()
+    x_fwd = chord_local.real
+    y_ctr = chord_local.imag * np.sign(angle_radians)
+
+    # Analytical initial guess: R varies linearly in turning angle
+    sin_A, cos_A = np.sin(arc), np.cos(arc)
+    m11 = sin_A + (cos_A - 1) / arc
+    m12 = (1 - cos_A) / arc
+    m21 = sin_A / arc - cos_A
+    m22 = 1 - sin_A / arc
+    det = m11 * m22 - m12 * m21
+    if abs(det) < 1e-8:
+        return fallback_R, fallback_R
+
+    R_e = (m22 * x_fwd - m12 * y_ctr) / det
+    R_s = (m11 * y_ctr - m21 * x_fwd) / det
+    if R_s <= 0 or R_e <= 0:
+        return fallback_R, fallback_R
+
+    # Newton refinement: match TrackEditor's arc-length model exactly
+    eps = max(R_s, R_e) * 1e-4
+    for _ in range(5):
+        x0, y0 = _simulate_curve_endpoint(R_s, R_e, arc)
+        fx, fy = x0 - x_fwd, y0 - y_ctr
+        if fx * fx + fy * fy < 1e-10:
+            break
+        x1, y1 = _simulate_curve_endpoint(R_s + eps, R_e, arc)
+        x2, y2 = _simulate_curve_endpoint(R_s, R_e + eps, arc)
+        j11, j12 = (x1 - x0) / eps, (x2 - x0) / eps
+        j21, j22 = (y1 - y0) / eps, (y2 - y0) / eps
+        jdet = j11 * j22 - j12 * j21
+        if abs(jdet) < 1e-14:
+            break
+        dRs = -(j22 * fx - j12 * fy) / jdet
+        dRe = -(j11 * fy - j21 * fx) / jdet
+        if R_s + dRs <= 0 or R_e + dRe <= 0:
+            break
+        R_s += dRs
+        R_e += dRe
+
+    if R_s > 0 and R_e > 0:
+        return R_s, R_e
+    return fallback_R, fallback_R
 
 def angle_between_segments(segment1, segment2):
     vector1 = np.array([segment1.end.real - segment1.start.real, segment1.end.imag - segment1.start.imag])
@@ -119,7 +186,7 @@ def generate_segments_xml(segments, parameters):
             else:
                 curvature = "lft"
 
-            radius, end_radius = calculate_radius_end_radius(angle, prev_segment, next_segment)
+            radius, end_radius = calculate_radius_end_radius(angle, segment, prev_segment)
         else:
             curvature = "str"
 
@@ -214,7 +281,7 @@ def main():
         raise ValueError(f"Unsupported operating system: {os.name}")
 
     parser = argparse.ArgumentParser(description="Convert SVG file to XML track for TrackGen for Torcs and Speed Dreams")
-    parser.add_argument("svgfile", type=str, help="Pathame of the SVG file")
+    parser.add_argument("svgfile", type=str, help="Path of the SVG file")
     parser.add_argument("-t", "--track-directory", type=str, default=parameters["default_track_directory"], help="The track directory of Torcs, Speed Dreams, or any other destination directory. Default: " + parameters["default_track_directory"])
     parser.add_argument("-c", "--category", type=str, default="circuit", help="The track category (circuit, road, oval, dirt...). Default is 'circuit'")
     parser.add_argument("-l", "--length", type=float, default=0, help="The length of the first segment in meters")
