@@ -9,52 +9,56 @@ from lxml import etree
 import xmlformatter
 
 
-def _simulate_curve_endpoint(R_s, R_e, arc, n_steps=100):
-    """Simulate TrackEditor's Curve.java algorithm (right-turn frame).
-    Returns (x_fwd, y_ctr): chord components along and perpendicular to start heading,
-    where y_ctr > 0 for a valid curve turning toward the center.
+def _curve_nb_steps(R_s, R_e, arc, step_length):
+    """Number of steps TrackGen divides a curve into (radii and step_length in meters)."""
+    length = arc * (R_s + R_e) / 2
+    return int(length / step_length) + 1
+
+
+def _simulate_curve_endpoint(R_s, R_e, arc, n_steps):
+    """Simulate how TrackGen builds a curve with n_steps steps.
+    Returns (x_fwd, y_ctr): chord components along and perpendicular to the start
+    heading, where y_ctr > 0 is the side of the curve center.
     """
-    L = arc * (R_s + R_e) / 2
-    delta_R = (R_e - R_s) / max(n_steps - 1, 1)
-    step_length = L / n_steps
+    length = arc * (R_s + R_e) / 2
+    step_length = length / n_steps
 
-    # Adjust step_length so total rotation equals arc exactly (as TrackEditor does)
-    if abs(R_e - R_s) > 1e-10:
-        tmp_angle, cur_R = 0.0, R_s
-        for _ in range(n_steps):
-            tmp_angle += step_length / cur_R
-            cur_R += delta_R
-        if tmp_angle > 1e-10:
-            step_length *= arc / tmp_angle
+    if R_e != R_s and n_steps != 1:
+        radii = R_s + (R_e - R_s) / (n_steps - 1) * np.arange(n_steps)
+        # TrackGen rescales step_length so the total rotation equals arc exactly
+        step_length *= arc / np.sum(step_length / radii)
+    else:
+        # With a single step TrackGen uses only the start radius and does not rescale
+        radii = np.full(n_steps, R_s)
 
-    X, Y, A, cur_R = 0.0, 0.0, 0.0, R_s
-    for _ in range(n_steps):
-        cos_t = np.cos(A + np.pi / 2)
-        sin_t = np.sin(A + np.pi / 2)
-        xC = X - cos_t * cur_R
-        yC = Y - sin_t * cur_R
-        sa = -step_length / cur_R   # negative = right turn
-        c, s = np.cos(sa), np.sin(sa)
-        dx, dy = X - xC, Y - yC
-        X = dx * c - dy * s + xC
-        Y = dx * s + dy * c + yC
-        A += sa
-        cur_R += delta_R
-
-    return X, -Y  # x_fwd, y_ctr (y_ctr > 0 for valid right turn)
+    # Each step is an exact circular arc of radius radii[k] turning step_arcs[k]
+    step_arcs = step_length / radii
+    end_angles = np.cumsum(step_arcs)
+    start_angles = end_angles - step_arcs
+    x_fwd = np.sum(radii * (np.sin(end_angles) - np.sin(start_angles)))
+    y_ctr = np.sum(radii * (np.cos(start_angles) - np.cos(end_angles)))
+    return x_fwd, y_ctr
 
 
-def calculate_radius_end_radius(angle_radians, segment, prev_segment):
+def calculate_radius_end_radius(angle_radians, segment, prev_segment, scale=1.0, step_length=4.0):
+    """Find (radius, end radius) so that TrackGen's curve ends where the SVG segment ends.
+
+    scale is the number of meters per SVG unit and step_length is the profil steps length
+    in meters. TrackGen's step count depends on the curve length in meters, so the
+    simulation runs in meters; the result is in SVG units.
+    Returns None when no single curve can end there (see calculate_biarc).
+    """
     arc = abs(angle_radians)
-    fallback_R = abs(segment.end - segment.start) / (2 * np.sin(arc / 2))
 
     if arc < 1e-4:
-        return fallback_R, fallback_R
+        return None
 
-    # Project chord into local frame aligned with start heading
+    fallback_R = abs(segment.end - segment.start) / (2 * np.sin(arc / 2))
+
+    # Project chord (in meters) into local frame aligned with start heading
     d1_unit = (prev_segment.end - prev_segment.start)
     d1_unit = d1_unit / abs(d1_unit)
-    chord_local = (segment.end - segment.start) * d1_unit.conjugate()
+    chord_local = (segment.end - segment.start) * d1_unit.conjugate() * scale
     x_fwd = chord_local.real
     y_ctr = chord_local.imag * np.sign(angle_radians)
 
@@ -66,37 +70,103 @@ def calculate_radius_end_radius(angle_radians, segment, prev_segment):
     m22 = 1 - sin_A / arc
     det = m11 * m22 - m12 * m21
     if abs(det) < 1e-8:
-        return fallback_R, fallback_R
-
-    R_e = (m22 * x_fwd - m12 * y_ctr) / det
-    R_s = (m11 * y_ctr - m21 * x_fwd) / det
+        R_s = R_e = 0
+    else:
+        R_e = (m22 * x_fwd - m12 * y_ctr) / det
+        R_s = (m11 * y_ctr - m21 * x_fwd) / det
     if R_s <= 0 or R_e <= 0:
-        return fallback_R, fallback_R
+        # Continuous model has no solution; start from a constant radius instead
+        R_s = R_e = fallback_R * scale
 
-    # Newton refinement: match TrackEditor's arc-length model exactly
-    eps = max(R_s, R_e) * 1e-4
-    for _ in range(5):
-        x0, y0 = _simulate_curve_endpoint(R_s, R_e, arc)
-        fx, fy = x0 - x_fwd, y0 - y_ctr
-        if fx * fx + fy * fy < 1e-10:
+    # Newton refinement against TrackGen's discrete algorithm. The step count is an
+    # integer that depends on the radii, so solve with it fixed and repeat until stable.
+    tolerance = (1e-9 * abs(chord_local)) ** 2
+    max_length = 10 * abs(chord_local)
+    for _ in range(10):
+        n_steps = _curve_nb_steps(R_s, R_e, arc, step_length)
+        x0, y0 = _simulate_curve_endpoint(R_s, R_e, arc, n_steps)
+        for _ in range(50):
+            fx, fy = x0 - x_fwd, y0 - y_ctr
+            residual = fx * fx + fy * fy
+            if residual < tolerance:
+                break
+            eps = max(R_s, R_e) * 1e-7
+            x1, y1 = _simulate_curve_endpoint(R_s + eps, R_e, arc, n_steps)
+            x2, y2 = _simulate_curve_endpoint(R_s, R_e + eps, arc, n_steps)
+            j11, j12 = (x1 - x0) / eps, (x2 - x0) / eps
+            j21, j22 = (y1 - y0) / eps, (y2 - y0) / eps
+            jdet = j11 * j22 - j12 * j21
+            if abs(jdet) < 1e-14:
+                break
+            dRs = -(j22 * fx - j12 * fy) / jdet
+            dRe = -(j11 * fy - j21 * fx) / jdet
+            # Backtracking: halve the step until radii stay positive, the curve length stays
+            # bounded (unreachable endpoints push radii to infinity) and the residual drops
+            step = 1.0
+            while step > 1e-6:
+                new_R_s, new_R_e = R_s + step * dRs, R_e + step * dRe
+                if new_R_s > 0 and new_R_e > 0 and arc * (new_R_s + new_R_e) / 2 < max_length:
+                    nx, ny = _simulate_curve_endpoint(new_R_s, new_R_e, arc, n_steps)
+                    if (nx - x_fwd) ** 2 + (ny - y_ctr) ** 2 < residual:
+                        break
+                step /= 2
+            if step <= 1e-6:
+                break
+            R_s, R_e, x0, y0 = new_R_s, new_R_e, nx, ny
+        if _curve_nb_steps(R_s, R_e, arc, step_length) == n_steps:
             break
-        x1, y1 = _simulate_curve_endpoint(R_s + eps, R_e, arc)
-        x2, y2 = _simulate_curve_endpoint(R_s, R_e + eps, arc)
-        j11, j12 = (x1 - x0) / eps, (x2 - x0) / eps
-        j21, j22 = (y1 - y0) / eps, (y2 - y0) / eps
-        jdet = j11 * j22 - j12 * j21
-        if abs(jdet) < 1e-14:
-            break
-        dRs = -(j22 * fx - j12 * fy) / jdet
-        dRe = -(j11 * fy - j21 * fx) / jdet
-        if R_s + dRs <= 0 or R_e + dRe <= 0:
-            break
-        R_s += dRs
-        R_e += dRe
 
-    if R_s > 0 and R_e > 0:
-        return R_s, R_e
-    return fallback_R, fallback_R
+    # Unreachable endpoint (e.g. S-shaped SVG curve)
+    n_steps = _curve_nb_steps(R_s, R_e, arc, step_length)
+    x0, y0 = _simulate_curve_endpoint(R_s, R_e, arc, n_steps)
+    if (x0 - x_fwd) ** 2 + (y0 - y_ctr) ** 2 > (1e-4 * abs(chord_local)) ** 2:
+        return None
+    # A single step turns length / R_s instead of arc, so it only works with a constant radius
+    if n_steps == 1 and abs(arc * (R_e - R_s) / (2 * R_s)) > 1e-7:
+        return None
+    return R_s / scale, R_e / scale
+
+def calculate_biarc(segment, prev_segment, next_segment):
+    """Join two straights with two consecutive constant radius curves (a biarc).
+
+    Used when a single TrackGen curve cannot end where the SVG segment ends. Returns two
+    (angle_radians, radius, end radius, length) tuples in SVG units, where the sign of the
+    angle follows angle_between_segments(). A piece that does not turn is a straight and
+    its radius is None. TrackGen builds constant radius curves exactly, whatever its
+    step count is.
+    """
+    def dot(a, b):
+        return (a * b.conjugate()).real
+
+    heading_start = prev_segment.end - prev_segment.start
+    heading_start = heading_start / abs(heading_start)
+    heading_end = next_segment.end - next_segment.start
+    heading_end = heading_end / abs(heading_end)
+    chord = segment.end - segment.start
+    headings = heading_start + heading_end
+
+    # Both curves use tangents of the same length
+    c = 1 - dot(heading_start, heading_end)
+    if c < 1e-12:
+        if dot(chord, heading_end) <= 0:
+            raise Exception("Two parallel straights cannot be joined when the second one starts behind the first one")
+        tangent = dot(chord, chord) / (4 * dot(chord, heading_end))
+    else:
+        tangent = (-dot(chord, headings) + np.sqrt(dot(chord, headings) ** 2 + 2 * c * dot(chord, chord))) / (2 * c)
+
+    # Heading at the point where both curves meet
+    heading_joint = (segment.end - tangent * heading_end) - (segment.start + tangent * heading_start)
+    heading_joint = heading_joint / abs(heading_joint)
+
+    pieces = []
+    for heading_in, heading_out in ((heading_start, heading_joint), (heading_joint, heading_end)):
+        angle = np.angle(heading_out / heading_in)
+        if abs(angle) < 1e-6:
+            pieces.append((0, None, None, 2 * tangent))
+        else:
+            radius = tangent / np.tan(abs(angle) / 2)
+            pieces.append((angle, radius, radius, radius * abs(angle)))
+    return pieces
 
 def angle_between_segments(segment1, segment2):
     vector1 = np.array([segment1.end.real - segment1.start.real, segment1.end.imag - segment1.start.imag])
@@ -144,7 +214,10 @@ def create_xml_file(segments, parameters):
     attstrDescription.set("val", parameters["description"])
 
     attstrGraphic = tree.xpath('//params/section[@name="Graphic"]/attstr[@name="3d description"]')[0]
-    attstrGraphic.set("val", parameters["name"] + ".ac")
+    attstrGraphic.set("val", os.path.splitext(os.path.basename(parameters["output_file"]))[0] + ".ac")
+
+    attnumStepLength = tree.xpath('//params/section[@name="Main Track"]/attnum[@name="profil steps length"]')[0]
+    attnumStepLength.set("val", str(parameters["step_length"]))
 
     node = tree.xpath('//params/section[@name="Main Track"]/section[@name="Track Segments"]')[0]
 
@@ -172,66 +245,82 @@ def format_number(value):
 def generate_segments_xml(segments, parameters):
     tracks = etree.Element("section")
     tracks.set("name", "Track Segments")
+    section_number = 0
     for i, segment in enumerate(segments):
-        length = segment.length()
         is_curved = not isinstance(segment, Line)
 
+        if i % 2 == 1 and not is_curved:
+            raise Exception("The track must have a curve after a straight segment")
+
+        # Each piece is (angle, radius, end radius, length); straights have no radius
         if is_curved:
+            segment_name = f"Curve {(i + 1) / 2:.0f}"
             prev_segment = segments[i - 1]
             next_segment = segments[(i + 1) % len(segments)]
 
             angle = angle_between_segments(prev_segment, next_segment)
-            if angle > 0:
+            scale = parameters["track_length"] / parameters["svg_length"] if parameters["track_length"] != 0 else 1.0
+            radii = calculate_radius_end_radius(angle, segment, prev_segment, scale, parameters["step_length"])
+            if radii is not None:
+                pieces = [(angle, radii[0], radii[1], segment.length())]
+            else:
+                pieces = calculate_biarc(segment, prev_segment, next_segment)
+                print(f"Warning: {segment_name} cannot be built with a single curve, it was replaced by: "
+                      + " + ".join(describe_piece(piece, parameters) for piece in pieces))
+        else:
+            segment_name = f"Straight {(i + 2) / 2:.0f}"
+            pieces = [(0, None, None, segment.length())]
+
+        for n, (angle, radius, end_radius, length) in enumerate(pieces):
+            if radius is None:
+                curvature = "str"
+            elif angle > 0:
                 curvature = "rgt"
             else:
                 curvature = "lft"
 
-            radius, end_radius = calculate_radius_end_radius(angle, segment, prev_segment)
-        else:
-            curvature = "str"
+            piece_name = segment_name if len(pieces) == 1 else f"{segment_name} ({n + 1}/{len(pieces)})"
+            tracks.append(etree.Comment(f"******************************"))
+            tracks.append(etree.Comment(f"{piece_name.center(30)}"))
+            tracks.append(etree.Comment(f"******************************"))
 
-        if i % 2 == 1 and curvature == "str":
-            raise Exception("The track must have a curve after a straight segment")
+            section_number += 1
+            track = etree.SubElement(tracks, "section")
+            track.set("name", f'{section_number}')
+            attstr = etree.SubElement(track, "attstr")
+            attstr.set("name", "type")
+            attstr.set("val", curvature)
 
-        if is_curved:
-            segment_name = f"Curve {(i + 1) / 2:.0f}"
-        else:
-            segment_name = f"Straight {(i + 2) / 2:.0f}"
-
-        tracks.append(etree.Comment(f"******************************"))
-        tracks.append(etree.Comment(f"{segment_name.center(30)}"))
-        tracks.append(etree.Comment(f"******************************"))
-
-        track = etree.SubElement(tracks, "section")
-        track.set("name", f'{i + 1}')
-        attstr = etree.SubElement(track, "attstr")
-        attstr.set("name", "type")
-        attstr.set("val", curvature)
-
-        if curvature == "str":
-            attnum = etree.SubElement(track, "attnum")
-            attnum.set("name", "lg")
-            attnum.set("unit", "m")
-            attnum.set("val", length_in_meters(length, parameters))
-        else:
-            attnum = etree.SubElement(track, "attnum")
-            attnum.set("name", "arc")
-            attnum.set("unit", "deg")
-            attnum.set("val", format_number(np.degrees(abs(angle))))
-            attnum = etree.SubElement(track, "attnum")
-            attnum.set("name", "radius")
-            attnum.set("unit", "m")
-            attnum.set("val", length_in_meters(radius, parameters))
-            if end_radius != radius:
+            if curvature == "str":
                 attnum = etree.SubElement(track, "attnum")
-                attnum.set("name", "end radius")
+                attnum.set("name", "lg")
                 attnum.set("unit", "m")
-                attnum.set("val", length_in_meters(end_radius, parameters))
-        attstr = etree.SubElement(track, "attstr")
-        attstr.set("name", "surface")
-        attstr.set("val", parameters["surface"])
+                attnum.set("val", length_in_meters(length, parameters))
+            else:
+                attnum = etree.SubElement(track, "attnum")
+                attnum.set("name", "arc")
+                attnum.set("unit", "deg")
+                attnum.set("val", format_number(np.degrees(abs(angle))))
+                attnum = etree.SubElement(track, "attnum")
+                attnum.set("name", "radius")
+                attnum.set("unit", "m")
+                attnum.set("val", length_in_meters(radius, parameters))
+                if end_radius != radius:
+                    attnum = etree.SubElement(track, "attnum")
+                    attnum.set("name", "end radius")
+                    attnum.set("unit", "m")
+                    attnum.set("val", length_in_meters(end_radius, parameters))
+            attstr = etree.SubElement(track, "attstr")
+            attstr.set("name", "surface")
+            attstr.set("val", parameters["surface"])
 
     return tracks
+
+def describe_piece(piece, parameters):
+    angle, radius, end_radius, length = piece
+    if radius is None:
+        return f"straight of {float(length_in_meters(length, parameters)):.1f} m"
+    return f"{'right' if angle > 0 else 'left'} curve of {np.degrees(abs(angle)):.2f} deg with radius {float(length_in_meters(radius, parameters)):.1f} m"
 
 def get_output_file(parameters, parser):
     if not os.path.exists(parameters["track_directory"]):
@@ -265,6 +354,7 @@ def main():
         "track_length": 0,
         "track_directory": "",
         "surface": "",
+        "step_length": 4.0,
         "category": "",
         "author": "",
         "name": "",
@@ -286,6 +376,7 @@ def main():
     parser.add_argument("-c", "--category", type=str, default="circuit", help="The track category (circuit, road, oval, dirt...). Default is 'circuit'")
     parser.add_argument("-l", "--length", type=float, default=0, help="The length of the first segment in meters")
     parser.add_argument("-s", "--surface", type=str, default="asphalt", help="The surface of the track. Possible values are: 'asphalt-lines', 'asphalt-l-left', 'asphalt-l-right', 'asphalt-l-both', 'asphalt-pits', 'asphalt', 'dirt', 'dirt-b', 'asphalt2', 'road1', 'road1-pits', 'road1-asphalt', 'asphalt-road1', 'b-road1', 'b-road1-l2', 'b-road1-l2p', 'concrete', 'concrete2', 'concrete3', 'b-asphalt', 'b-asphalt-l1', 'b-asphalt-l1p', 'asphalt2-lines', 'asphalt2-l-left', 'asphalt2-l-right', 'asphalt2-l-both', 'grass', 'grass3', 'grass5', 'grass6', 'grass7', 'gravel', 'sand3', 'sand', 'curb-5cm-r', 'curb-5cm-l', 'curb-l', 'tar-grass3-l', 'tar-grass3-r', 'tar-sand'. Default is 'asphalt'")
+    parser.add_argument("--step-length", type=float, default=4.0, help="The profil steps length of the track in meters. Default is 4.0")
     parser.add_argument("-a", "--author", type=str, default="", help="Name of author of the track")
     parser.add_argument("-n", "--name", type=str, default="Oval", help="The track name")
     parser.add_argument("-d", "--description", type=str, help="The description of the track")
@@ -296,10 +387,14 @@ def main():
     parameters["track_directory"] = args.track_directory
     parameters["main_straight_length"] = args.length
     parameters["surface"] = args.surface
+    parameters["step_length"] = args.step_length
     parameters["category"] = args.category
     parameters["author"] = args.author
     parameters["name"] = args.name
     parameters["description"] = args.description
+
+    if parameters["step_length"] <= 0:
+        parser.error("The step length must be greater than 0.")
 
     parameters["output_file"] = get_output_file(parameters, parser)
     print(f"Output file: {parameters['output_file']}")

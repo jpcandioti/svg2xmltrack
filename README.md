@@ -31,7 +31,7 @@ If you want to create a real circuit, you can paste a map image and draw the SVG
 
 ~~~.shell
 $ ./svg2xmltrack.py -h
-usage: svg2xmltrack.py [-h] [-t TRACK_DIRECTORY] [-c CATEGORY] [-l LENGTH] [-s SURFACE] [-a AUTHOR] [-n NAME] [-d DESCRIPTION] svgfile
+usage: svg2xmltrack.py [-h] [-t TRACK_DIRECTORY] [-c CATEGORY] [-l LENGTH] [-s SURFACE] [--step-length STEP_LENGTH] [-a AUTHOR] [-n NAME] [-d DESCRIPTION] svgfile
 
 Convert SVG file to XML track for TrackGen for Torcs and Speed Dreams
 
@@ -50,6 +50,8 @@ optional arguments:
                         The surface of the track. Possible values are: 'asphalt-lines', 'asphalt-l-left', 'asphalt-l-right', 'asphalt-l-both', 'asphalt-pits', 'asphalt', 'dirt', 'dirt-b', 'asphalt2', 'road1', 'road1-pits', 'road1-asphalt', 'asphalt-road1',
                         'b-road1', 'b-road1-l2', 'b-road1-l2p', 'concrete', 'concrete2', 'concrete3', 'b-asphalt', 'b-asphalt-l1', 'b-asphalt-l1p', 'asphalt2-lines', 'asphalt2-l-left', 'asphalt2-l-right', 'asphalt2-l-both', 'grass', 'grass3', 'grass5',
                         'grass6', 'grass7', 'gravel', 'sand3', 'sand', 'curb-5cm-r', 'curb-5cm-l', 'curb-l', 'tar-grass3-l', 'tar-grass3-r', 'tar-sand'. Default is 'asphalt'
+  --step-length STEP_LENGTH
+                        The profil steps length of the track in meters. Default is 4.0
   -a AUTHOR, --author AUTHOR
                         Name of author of the track
   -n NAME, --name NAME  The track name
