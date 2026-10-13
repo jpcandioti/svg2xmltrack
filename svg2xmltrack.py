@@ -246,6 +246,9 @@ def generate_segments_xml(segments, parameters):
     tracks = etree.Element("section")
     tracks.set("name", "Track Segments")
     section_number = 0
+    scale = parameters["track_length"] / parameters["svg_length"] if parameters["track_length"] != 0 else 1.0
+    start_offset = parameters["start_offset"] / scale
+    named_pieces = []
     for i, segment in enumerate(segments):
         is_curved = not isinstance(segment, Line)
 
@@ -259,7 +262,6 @@ def generate_segments_xml(segments, parameters):
             next_segment = segments[(i + 1) % len(segments)]
 
             angle = angle_between_segments(prev_segment, next_segment)
-            scale = parameters["track_length"] / parameters["svg_length"] if parameters["track_length"] != 0 else 1.0
             radii = calculate_radius_end_radius(angle, segment, prev_segment, scale, parameters["step_length"])
             if radii is not None:
                 pieces = [(angle, radii[0], radii[1], segment.length())]
@@ -270,7 +272,17 @@ def generate_segments_xml(segments, parameters):
         else:
             segment_name = f"Straight {(i + 2) / 2:.0f}"
             pieces = [(0, None, None, segment.length())]
+            if i == 0 and start_offset > 0:
+                # The track starts at the start line, so the first straight begins there
+                pieces = [(0, None, None, segment.length() - start_offset)]
 
+        named_pieces.append((segment_name, pieces))
+
+    if start_offset > 0:
+        # The part of the first straight that is before the start line closes the track
+        named_pieces.append(("Straight 1 (before start)", [(0, None, None, start_offset)]))
+
+    for segment_name, pieces in named_pieces:
         for n, (angle, radius, end_radius, length) in enumerate(pieces):
             if radius is None:
                 curvature = "str"
@@ -355,6 +367,7 @@ def main():
         "track_directory": "",
         "surface": "",
         "step_length": 4.0,
+        "start_offset": 0.0,
         "category": "",
         "author": "",
         "name": "",
@@ -377,6 +390,7 @@ def main():
     parser.add_argument("-l", "--length", type=float, default=0, help="The length of the first segment in meters")
     parser.add_argument("-s", "--surface", type=str, default="asphalt", help="The surface of the track. Possible values are: 'asphalt-lines', 'asphalt-l-left', 'asphalt-l-right', 'asphalt-l-both', 'asphalt-pits', 'asphalt', 'dirt', 'dirt-b', 'asphalt2', 'road1', 'road1-pits', 'road1-asphalt', 'asphalt-road1', 'b-road1', 'b-road1-l2', 'b-road1-l2p', 'concrete', 'concrete2', 'concrete3', 'b-asphalt', 'b-asphalt-l1', 'b-asphalt-l1p', 'asphalt2-lines', 'asphalt2-l-left', 'asphalt2-l-right', 'asphalt2-l-both', 'grass', 'grass3', 'grass5', 'grass6', 'grass7', 'gravel', 'sand3', 'sand', 'curb-5cm-r', 'curb-5cm-l', 'curb-l', 'tar-grass3-l', 'tar-grass3-r', 'tar-sand'. Default is 'asphalt'")
     parser.add_argument("--step-length", type=float, default=4.0, help="The profil steps length of the track in meters. Default is 4.0")
+    parser.add_argument("--start-offset", type=float, default=0, help="Distance in meters from the beginning of the first segment to the start line. Default is 0")
     parser.add_argument("-a", "--author", type=str, default="", help="Name of author of the track")
     parser.add_argument("-n", "--name", type=str, default="Oval", help="The track name")
     parser.add_argument("-d", "--description", type=str, help="The description of the track")
@@ -388,6 +402,7 @@ def main():
     parameters["main_straight_length"] = args.length
     parameters["surface"] = args.surface
     parameters["step_length"] = args.step_length
+    parameters["start_offset"] = args.start_offset
     parameters["category"] = args.category
     parameters["author"] = args.author
     parameters["name"] = args.name
@@ -420,6 +435,10 @@ def main():
     parameters["track_length"] = parameters["main_straight_length"] / segments[0].length() * parameters["svg_length"]
     print(f"The total length of the track is " + length_in_meters(parameters['svg_length'], parameters) + " meters.")
     print(f"Total segments: {len(segments)}")
+
+    first_segment_length = float(length_in_meters(segments[0].length(), parameters))
+    if not 0 <= parameters["start_offset"] < first_segment_length:
+        parser.error(f"The start offset must be between 0 and the length of the first segment ({first_segment_length:.2f} m).")
 
     create_xml_file(segments, parameters)
 

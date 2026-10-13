@@ -31,7 +31,7 @@ If you want to create a real circuit, you can paste a map image and draw the SVG
 
 ~~~.shell
 $ ./svg2xmltrack.py -h
-usage: svg2xmltrack.py [-h] [-t TRACK_DIRECTORY] [-c CATEGORY] [-l LENGTH] [-s SURFACE] [--step-length STEP_LENGTH] [-a AUTHOR] [-n NAME] [-d DESCRIPTION] svgfile
+usage: svg2xmltrack.py [-h] [-t TRACK_DIRECTORY] [-c CATEGORY] [-l LENGTH] [-s SURFACE] [--step-length STEP_LENGTH] [--start-offset START_OFFSET] [-a AUTHOR] [-n NAME] [-d DESCRIPTION] svgfile
 
 Convert SVG file to XML track for TrackGen for Torcs and Speed Dreams
 
@@ -52,6 +52,8 @@ optional arguments:
                         'grass6', 'grass7', 'gravel', 'sand3', 'sand', 'curb-5cm-r', 'curb-5cm-l', 'curb-l', 'tar-grass3-l', 'tar-grass3-r', 'tar-sand'. Default is 'asphalt'
   --step-length STEP_LENGTH
                         The profil steps length of the track in meters. Default is 4.0
+  --start-offset START_OFFSET
+                        Distance in meters from the beginning of the first segment to the start line. Default is 0
   -a AUTHOR, --author AUTHOR
                         Name of author of the track
   -n NAME, --name NAME  The track name
@@ -63,5 +65,5 @@ optional arguments:
 ## Example
 
 ~~~.shell
-./svg2xmltrack.py -nRosario -ccircuit -d"Autódromo Juan Manuel Fangio de la Ciudad de Rosario" -l480.53 rosario.svg
+./svg2xmltrack.py -nRosario -ccircuit -d"Autódromo Juan Manuel Fangio de la Ciudad de Rosario" -l480.53 --start-offset 89.59 rosario.svg
 ~~~
