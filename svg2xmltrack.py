@@ -3,7 +3,7 @@
 import argparse
 import os
 from svgpathtools import svg2paths
-from svgpathtools.path import Line
+from svgpathtools.path import Line, Path
 import numpy as np
 from lxml import etree
 import xmlformatter
@@ -409,6 +409,11 @@ def main():
     # Chechk if the path is closed
     is_closed = segments.isclosed()
     print(f"The path {'is circular' if is_closed else 'is not circular'}.")
+
+    # Rounding errors can make the closing "z" of the SVG path add a line of almost zero
+    # length, which would become an empty last segment with a meaningless direction
+    if is_closed and isinstance(segments[-1], Line) and segments[-1].length() < 1e-9 * segments.length():
+        segments = Path(*segments[:-1])
 
     # Calculate the total length of the track
     parameters["svg_length"] = segments.length()
