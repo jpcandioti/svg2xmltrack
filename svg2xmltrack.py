@@ -5,6 +5,7 @@ import os
 from svgpathtools import svg2paths
 from svgpathtools.path import Line, Path
 import numpy as np
+from scipy.optimize import least_squares
 from lxml import etree
 import xmlformatter
 
@@ -49,77 +50,29 @@ def calculate_radius_end_radius(angle_radians, segment, prev_segment, scale=1.0,
     Returns None when no single curve can end there (see calculate_biarc).
     """
     arc = abs(angle_radians)
-
     if arc < 1e-4:
         return None
 
-    fallback_R = abs(segment.end - segment.start) / (2 * np.sin(arc / 2))
+    # Chord (in meters) in the local frame aligned with the start heading
+    chord = (segment.end - segment.start) * _heading(prev_segment).conjugate() * scale
+    target = chord.real, chord.imag * np.sign(angle_radians)
 
-    # Project chord (in meters) into local frame aligned with start heading
-    d1_unit = (prev_segment.end - prev_segment.start)
-    d1_unit = d1_unit / abs(d1_unit)
-    chord_local = (segment.end - segment.start) * d1_unit.conjugate() * scale
-    x_fwd = chord_local.real
-    y_ctr = chord_local.imag * np.sign(angle_radians)
-
-    # Analytical initial guess: R varies linearly in turning angle
-    sin_A, cos_A = np.sin(arc), np.cos(arc)
-    m11 = sin_A + (cos_A - 1) / arc
-    m12 = (1 - cos_A) / arc
-    m21 = sin_A / arc - cos_A
-    m22 = 1 - sin_A / arc
-    det = m11 * m22 - m12 * m21
-    if abs(det) < 1e-8:
-        R_s = R_e = 0
-    else:
-        R_e = (m22 * x_fwd - m12 * y_ctr) / det
-        R_s = (m11 * y_ctr - m21 * x_fwd) / det
-    if R_s <= 0 or R_e <= 0:
-        # Continuous model has no solution; start from a constant radius instead
-        R_s = R_e = fallback_R * scale
-
-    # Newton refinement against TrackGen's discrete algorithm. The step count is an
-    # integer that depends on the radii, so solve with it fixed and repeat until stable.
-    tolerance = (1e-9 * abs(chord_local)) ** 2
-    max_length = 10 * abs(chord_local)
+    # Start from a constant radius. The step count is an integer that depends on the radii,
+    # so solve with it fixed and repeat until stable. The bounds keep the radii positive
+    # and finite, since unreachable endpoints push them to infinity.
+    radii = np.full(2, abs(chord) / (2 * np.sin(arc / 2)))
+    bounds = (1e-6 * abs(chord), 20 * abs(chord) / arc)
     for _ in range(10):
-        n_steps = _curve_nb_steps(R_s, R_e, arc, step_length)
-        x0, y0 = _simulate_curve_endpoint(R_s, R_e, arc, n_steps)
-        for _ in range(50):
-            fx, fy = x0 - x_fwd, y0 - y_ctr
-            residual = fx * fx + fy * fy
-            if residual < tolerance:
-                break
-            eps = max(R_s, R_e) * 1e-7
-            x1, y1 = _simulate_curve_endpoint(R_s + eps, R_e, arc, n_steps)
-            x2, y2 = _simulate_curve_endpoint(R_s, R_e + eps, arc, n_steps)
-            j11, j12 = (x1 - x0) / eps, (x2 - x0) / eps
-            j21, j22 = (y1 - y0) / eps, (y2 - y0) / eps
-            jdet = j11 * j22 - j12 * j21
-            if abs(jdet) < 1e-14:
-                break
-            dRs = -(j22 * fx - j12 * fy) / jdet
-            dRe = -(j11 * fy - j21 * fx) / jdet
-            # Backtracking: halve the step until radii stay positive, the curve length stays
-            # bounded (unreachable endpoints push radii to infinity) and the residual drops
-            step = 1.0
-            while step > 1e-6:
-                new_R_s, new_R_e = R_s + step * dRs, R_e + step * dRe
-                if new_R_s > 0 and new_R_e > 0 and arc * (new_R_s + new_R_e) / 2 < max_length:
-                    nx, ny = _simulate_curve_endpoint(new_R_s, new_R_e, arc, n_steps)
-                    if (nx - x_fwd) ** 2 + (ny - y_ctr) ** 2 < residual:
-                        break
-                step /= 2
-            if step <= 1e-6:
-                break
-            R_s, R_e, x0, y0 = new_R_s, new_R_e, nx, ny
-        if _curve_nb_steps(R_s, R_e, arc, step_length) == n_steps:
+        n_steps = _curve_nb_steps(*radii, arc, step_length)
+        radii = least_squares(lambda r: np.subtract(_simulate_curve_endpoint(*r, arc, n_steps), target),
+                              np.clip(radii, *bounds), bounds=bounds, x_scale="jac", xtol=1e-15, ftol=1e-15, gtol=1e-15).x
+        if _curve_nb_steps(*radii, arc, step_length) == n_steps:
             break
 
-    # Unreachable endpoint (e.g. S-shaped SVG curve)
+    R_s, R_e = radii
     n_steps = _curve_nb_steps(R_s, R_e, arc, step_length)
-    x0, y0 = _simulate_curve_endpoint(R_s, R_e, arc, n_steps)
-    if (x0 - x_fwd) ** 2 + (y0 - y_ctr) ** 2 > (1e-4 * abs(chord_local)) ** 2:
+    # Unreachable endpoint (e.g. S-shaped SVG curve)
+    if np.hypot(*np.subtract(_simulate_curve_endpoint(R_s, R_e, arc, n_steps), target)) > 1e-4 * abs(chord):
         return None
     # A single step turns length / R_s instead of arc, so it only works with a constant radius
     if n_steps == 1 and abs(arc * (R_e - R_s) / (2 * R_s)) > 1e-7:
@@ -138,10 +91,7 @@ def calculate_biarc(segment, prev_segment, next_segment):
     def dot(a, b):
         return (a * b.conjugate()).real
 
-    heading_start = prev_segment.end - prev_segment.start
-    heading_start = heading_start / abs(heading_start)
-    heading_end = next_segment.end - next_segment.start
-    heading_end = heading_end / abs(heading_end)
+    heading_start, heading_end = _heading(prev_segment), _heading(next_segment)
     chord = segment.end - segment.start
     headings = heading_start + heading_end
 
@@ -168,22 +118,13 @@ def calculate_biarc(segment, prev_segment, next_segment):
             pieces.append((angle, radius, radius, radius * abs(angle)))
     return pieces
 
+def _heading(segment):
+    """Unit vector (as a complex number) from the start to the end of a segment."""
+    return (segment.end - segment.start) / abs(segment.end - segment.start)
+
 def angle_between_segments(segment1, segment2):
-    vector1 = np.array([segment1.end.real - segment1.start.real, segment1.end.imag - segment1.start.imag])
-    vector2 = np.array([segment2.end.real - segment2.start.real, segment2.end.imag - segment2.start.imag])
-
-    unit_v1 = vector1 / np.linalg.norm(vector1)
-    unit_v2 = vector2 / np.linalg.norm(vector2)
-    dot_product = np.dot(unit_v1, unit_v2)
-
-    angle_radians = np.arccos(np.clip(dot_product, -1.0, 1.0))
-
-    cross_product = np.cross(vector1, vector2)
-
-    if cross_product < 0:
-        angle_radians = -angle_radians
-
-    return angle_radians
+    """Signed angle in radians from segment1 to segment2; positive is a right turn in SVG coordinates."""
+    return np.angle(_heading(segment2) / _heading(segment1))
 
 def length_in_meters(value, parameters):
     if parameters["track_length"] == 0:
@@ -196,7 +137,7 @@ def create_xml_file(segments, parameters):
 <!--  general definitions for tracks  -->
 <!ENTITY default-surfaces SYSTEM "../../../data/tracks/surfaces.xml">
 ]>"""
-    tree = etree.parse("template.xml")
+    tree = etree.parse(os.path.join(os.path.dirname(os.path.realpath(__file__)), "template.xml"))
 
     attstrCategory = tree.xpath('//params/section[@name="Header"]/attstr[@name="category"]')[0]
     attstrCategory.set("val", parameters["category"])
@@ -262,6 +203,9 @@ def generate_segments_xml(segments, parameters):
             next_segment = segments[(i + 1) % len(segments)]
 
             angle = angle_between_segments(prev_segment, next_segment)
+            if abs(abs(angle) - np.pi) < 1e-9:
+                # A U-turn between parallel straights has no sign of its own: turn towards its end
+                angle = np.copysign(np.pi, np.angle((segment.end - segment.start) / _heading(prev_segment)))
             radii = calculate_radius_end_radius(angle, segment, prev_segment, scale, parameters["step_length"])
             if radii is not None:
                 pieces = [(angle, radii[0], radii[1], segment.length())]
